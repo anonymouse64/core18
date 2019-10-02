@@ -5,14 +5,27 @@
 
 set -eux
 
+mkdir -p /var/log/
+
+touch /var/log/run-snapd-from-snap.log
+
+print_system()
+{
+    printf "%s run-snapd-from-snap: %s\n" "$(date -Iseconds --utc)" "$1" |
+        tee -a /dev/kmsg /dev/console /var/log/run-snapd-from-snap.log || true
+}
+
 # run_on_unseeded will mount/run snapd on an unseeded system
 run_on_unseeded() {
+    print_system "running on unseeded system"
     SEED_SNAPD="$(find /var/lib/snapd/seed/snaps/ -name "snapd_*.snap")"
     if [ ! -e "$SEED_SNAPD" ]; then
         echo "Cannot find a seeded snapd"
         ls /var/lib/snapd/seed/snaps
         exit 1
     fi
+
+    print_system "found a snapd snap at $SEED_SNAPD"
 
     # mount snapd snap and run snapd directly, it will do
     # the seeding and as part of this will restart snapd
@@ -26,10 +39,13 @@ run_on_unseeded() {
     # a systemd socket unit so that systemd own the socket, otherwise
     # the socket file would be removed by snapd on exit and the snapd.seeded
     # service will fail because it has nothing to talk to anymore.
+    print_system "creating snapd temp socket service at $TMPD/usr/lib/snapd/snapd"
     systemd-run --unit=snapd-seeding --service-type=notify --socket-property ListenStream=/run/snapd.socket --socket-property ListenStream=/run/snapd-snap.socket "$TMPD"/usr/lib/snapd/snapd
     # we need to start the snapd service from above explicitly, systemd-run
     # only enables the socket but does not start the service.
+    print_system "starting wait for snapd to be seeded service, which triggers snapd to be socket activated"
     systemctl start --wait snapd-seeding.service
+    print_system "done activating snapd service, the socket is available"
     # at this point the snapd.socket is available
     systemctl stop snapd-seeding.socket
 
@@ -39,16 +55,23 @@ run_on_unseeded() {
     # seeding is done to ensure that console-conf is only started
     # after this script has finished.
     # (redirect stdin because that is what snap checks for pty)
+    print_system "now waiting for snap seed change to be done with snap watch"
     /usr/bin/snap watch --last=seed < /dev/console | tee -a /dev/console
 }
 
 # Unseeded systems need to be seeded first, this will start snapd
 # and snapd will restart itself after the seeding.
-if [ ! -e /var/lib/snapd/state.json ]; then
+print_system "checking if snapd state.json exists"
+set +e
+if [ ! -e /var/lib/snapd/state.json ] || ! systemctl status snapd ; then
+    set -e
+    print_system "state.json doesn't exist, running seed"
     if ! run_on_unseeded; then
         echo "cannot run snapd from the seed"
         exit 1
     fi
     exit 0
 fi
+set -e
 
+print_system "state.json exists with content: $(cat /var/lib/snapd/state.json)"
